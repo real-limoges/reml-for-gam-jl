@@ -7,7 +7,7 @@ using LinearAlgebra
 using Random
 
 
-function simulate_gam_data(n::Int=200; noise_level::Float64=0.15, seed::Int=42)
+function simulate_gam_data(n::Int; noise_level::Float64=0.15, seed::Int=42)
     Random.seed!(seed)
     x = rand(n)
 
@@ -81,38 +81,38 @@ function fit_gam_mixed_model(df::DataFrame, X_fixed::Matrix, X_random::Matrix)
     return fit(MixedModel, lmm_formula, fit_data)
 end
 
-function reconstruct_smooth(model::LinearMixedModel, X_basis::Matrix, reparam::NamedTuple)
-    fixed_coeffs = fixef(model)
-    random_coeffs = ranef(model)[1]
+# function reconstruct_smooth(model::LinearMixedModel, X_basis::Matrix, reparam::NamedTuple)
+#     fixed_coeffs = fixef(model)
+#     random_coeffs = ranef(model)[1]
+#
+#     # Transform coefficients back to the original basis space
+#     original_basis_coeffs = reparam.eigenvectors[:, reparam.null_indices] * fixed_coeffs[2:end] .+
+#                              reparam.eigenvectors[:, reparam.penalized_indices] * reparam.inv_sqrt_eigenvalues * random_coeffs
+#
+#     # Calculate the final smooth curve
+#     return X_basis * original_basis_coeffs .+ fixed_coeffs[1]
+# end
 
-    # Transform coefficients back to the original basis space
-    original_basis_coeffs = reparam.eigenvectors[:, reparam.null_indices] * fixed_coeffs[2:end] .+
-                             reparam.eigenvectors[:, reparam.penalized_indices] * reparam.inv_sqrt_eigenvalues * random_coeffs
-
-    # Calculate the final smooth curve
-    return X_basis * original_basis_coeffs .+ fixed_coeffs[1]
-end
-
-function plot_gam_fit(df::DataFrame, basis::BSplineBasis, fitted_coeffs::Vector, intercept::Float64)
-    sort!(df, :x) # Sort for clean plotting lines
-
-    # Recalculate smooth on the sorted x-values for a clean line
-    sorted_X_basis = basismatrix(basis, df.x)
-    fitted_gam_sorted = sorted_X_basis * fitted_coeffs .+ intercept
-
-    p = plot(df.x, df.y, seriestype=:scatter, label="Data", color=:gray, alpha=0.5, markershape=:circle, markerstrokewidth=0)
-    plot!(p, df.x, df.true_f, label="True Function", linewidth=2.5, color=:black)
-    plot!(p, df.x, fitted_gam_sorted, label="Mixed Model GAM Fit", linewidth=2.5, linestyle=:dash, color=:dodgerblue)
-    title!("GAM as a Mixed Model in Julia")
-    xlabel!("Predictor (x)")
-    ylabel!("Response (y)")
-    plot!(p, legend=:bottomright)
-    return p
-end
+# function plot_gam_fit(df::DataFrame, basis::BSplineBasis, fitted_coeffs::Vector, intercept::Float64)
+#     sort!(df, :x) # Sort for clean plotting lines
+#
+#     # Recalculate smooth on the sorted x-values for a clean line
+#     sorted_X_basis = basismatrix(basis, df.x)
+#     fitted_gam_sorted = sorted_X_basis * fitted_coeffs .+ intercept
+#
+#     p = plot(df.x, df.y, seriestype=:scatter, label="Data", color=:gray, alpha=0.5, markershape=:circle, markerstrokewidth=0)
+#     plot!(p, df.x, df.true_f, label="True Function", linewidth=2.5, color=:black)
+#     plot!(p, df.x, fitted_gam_sorted, label="Mixed Model GAM Fit", linewidth=2.5, linestyle=:dash, color=:dodgerblue)
+#     title!("GAM as a Mixed Model in Julia")
+#     xlabel!("Predictor (x)")
+#     ylabel!("Response (y)")
+#     plot!(p, legend=:bottomright)
+#     return p
+# end
 
 
 function main()
-    n_points = 200
+    n_points = 10000
     n_basis_funcs = 12
     spline_order = 4 # Cubic
 
