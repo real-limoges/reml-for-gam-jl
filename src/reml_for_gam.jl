@@ -1,3 +1,6 @@
+module reml_for_gam
+
+using CSV
 using DataFrames
 using BSplines
 using MixedModels
@@ -6,19 +9,6 @@ using Plots
 using LinearAlgebra
 using Random
 
-
-function simulate_gam_data(n::Int; noise_level::Float64=0.15, seed::Int=42)
-    Random.seed!(seed)
-    x = rand(n)
-
-    true_f(val) = val^11 * (10 * (1 - val))^6 + (10 * val)^3 * (1 - val)^10
-    y_true = true_f.(x)
-    noise = randn(n) .* (std(y_true) * noise_level)
-    y = y_true + noise
-
-    println("Data simulated successfully.")
-    return DataFrame(x = x, y = y, true_f = y_true)
-end
 
 function create_bspline_basis_and_penalty(x::Vector, k::Int, order::Int)
     knots = range(minimum(x), maximum(x), length = k - order + 2)
@@ -116,7 +106,7 @@ function main()
     n_basis_funcs = 12
     spline_order = 4 # Cubic
 
-    sim_data = simulate_gam_data(n_points)
+    sim_data = CSV.read("cached_data.csv", DataFrame)
 
     basis, X_basis, S_penalty = create_bspline_basis_and_penalty(sim_data.x, n_basis_funcs, spline_order)
 
@@ -139,4 +129,4 @@ function main()
 #     display(final_plot)
 end
 
-main()
+end
