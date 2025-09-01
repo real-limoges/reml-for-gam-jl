@@ -9,18 +9,14 @@ using StatsModels: FormulaTerm, Term, TupleTerm, modelmatrix, response
 
 export GAM, Smooth, fit!, predict
 
-# --- API for defining smooth terms ---
-
 """
     Smooth(term::Symbol; spline_type=:b_spline, n_knots=20, degree=3)
 
-Defines a smooth term to be included in the GAM.
-
 # Arguments
-- `term::Symbol`: The name of the variable in the data frame to apply the smoother to.
-- `spline_type::Symbol`: The type of spline to use (`:b_spline`, `:cubic_spline`, or `:pc_spline`).
-- `n_knots::Int`: The number of knots to use for the spline basis.
-- `degree::Int`: The degree of the B-spline (if used).
+- term::Symbol: The name of the variable in the data frame to apply the smoother to.
+- spline_type::Symbol: :b_spline, :cubic_spline, or :pc_spline
+- n_knots The number of knots to use for the spline basis.
+- degree::Int: The degree of the B-spline
 """
 struct Smooth
     term::Symbol
@@ -64,7 +60,6 @@ mutable struct GAM
     spline_info::Dict{Symbol, Dict{Symbol, Any}} # Stores knots, degree, etc. for each smooth
 end
 
-# --- Basis and Penalty Functions (Unchanged) ---
 
 function b_spline_basis(x, knots, degree)
     n = length(x)
