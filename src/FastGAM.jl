@@ -1,213 +1,275 @@
 module FastGAM
 
-using LinearAlgebra, Distributions, Optim, GLM, DataFrames
+using DataFrames
+using Distributions
+using GLM
+using LinearAlgebra
+using Optim
+using StatsModels: FormulaTerm, Term, TupleTerm, modelmatrix, response
 
-export GAM, fit!, predict
+export GAM, Smooth, fit!, predict
 
-# mutable so it can be faster
+# --- API for defining smooth terms ---
+
+"""
+    Smooth(term::Symbol; spline_type=:b_spline, n_knots=20, degree=3)
+
+Defines a smooth term to be included in the GAM.
+
+# Arguments
+- `term::Symbol`: The name of the variable in the data frame to apply the smoother to.
+- `spline_type::Symbol`: The type of spline to use (`:b_spline`, `:cubic_spline`, or `:pc_spline`).
+- `n_knots::Int`: The number of knots to use for the spline basis.
+- `degree::Int`: The degree of the B-spline (if used).
+"""
+struct Smooth
+    term::Symbol
+    spline_type::Symbol
+    n_knots::Int
+    degree::Int
+end
+# Provide a convenient keyword-based constructor
+Smooth(term::Symbol; spline_type::Symbol=:b_spline, n_knots::Int=20, degree::Int=3) = Smooth(term, spline_type, n_knots, degree)
+
+
+# --- Core GAM Structure ---
+
 mutable struct GAM
+    # Inputs
     formula::FormulaTerm
+    smooths::Vector{Smooth}
     data::DataFrame
     y::Vector{Float64}
-    X::Matrix{Float64}
-    S::Matrix{Float64} # Penalty matrix
-    beta::Vector{Float64}
-    lambda::Float64 # Smoothing parameter
-    reml_score::Float64
-
-    # Information for prediction
-    spline_type::Symbol
-    knots::Vector{Float64}
-    degree::Int
+    X::Matrix{Float64} # Full model matrix (linear part + all smooth bases)
+    S::Matrix{Float64} # Block-diagonal penalty matrix (unscaled)
     
-    # Stores eigenvector matrix for PC splines
-    pc_transform::Union{Matrix{Float64}, Nothing}
+    # Information about model structure
+    param_indices::Dict{Symbol, UnitRange{Int}} # Stores indices for each model component
+    
+    # Fitted parameters
+    beta::Vector{Float64}
+    lambdas::Vector{Float64}
+
+    # Model summary statistics
+    fitted_values::Vector{Float64}
+    residuals::Vector{Float64}
+    vcov::Matrix{Float64}
+    edf::Float64
+    scale::Float64
+    adj_r_squared::Float64
+    deviance_explained::Float64
+    reml_score::Float64
+    
+    # Information for prediction
+    spline_info::Dict{Symbol, Dict{Symbol, Any}} # Stores knots, degree, etc. for each smooth
 end
 
-# B Splines
+# --- Basis and Penalty Functions (Unchanged) ---
+
 function b_spline_basis(x, knots, degree)
     n = length(x)
-    k = length(knots)
-    m = k + degree - 1
-
-    # Create augmented knot vector
     aug_knots = [fill(knots[1], degree); knots; fill(knots[end], degree)]
-
+    
+    # The number of basis functions is determined by the number of knots and the degree.
+    # m = N - p - 1, where N is the number of knots in the augmented vector.
+    m = length(aug_knots) - degree - 1
+    
     B = zeros(n, m)
-    for i in 1:n
-        for j in 1:m
-            B[i, j] = b_spline_basis_element(x[i], j, degree, aug_knots)
-        end
+    for i in 1:n, j in 1:m
+        B[i, j] = b_spline_basis_element(x[i], j, degree, aug_knots)
     end
     return B
 end
 
 function b_spline_basis_element(x, j, p, t)
-    if p == 0
-        return t[j] <= x < t[j+1] || (x == t[end] && j == length(t) - 1) ? 1.0 : 0.0
-    end
-    w1 = 0.0
-    if t[j+p] - t[j] > 1e-9
-        w1 = (x - t[j]) / (t[j+p] - t[j]) * b_spline_basis_element(x, j, p - 1, t)
-    end
-    w2 = 0.0
-    if t[j+p+1] - t[j+1] > 1e-9
-        w2 = (t[j+p+1] - x) / (t[j+p+1] - t[j+1]) * b_spline_basis_element(x, j + 1, p - 1, t)
-    end
+    if p == 0; return t[j] <= x < t[j+1] || (x == t[end] && j == length(t) - p - 1) ? 1.0 : 0.0; end
+    w1 = 0.0; w2 = 0.0
+    if t[j+p] - t[j] > 1e-9; w1 = (x - t[j]) / (t[j+p] - t[j]) * b_spline_basis_element(x, j, p - 1, t); end
+    if t[j+p+1] - t[j+1] > 1e-9; w2 = (t[j+p+1] - x) / (t[j+p+1] - t[j+1]) * b_spline_basis_element(x, j + 1, p - 1, t); end
     return w1 + w2
 end
 
-# Cubics
-function cubic_spline_basis(x, knots)
-    n = length(x)
-    k = length(knots)
-    X = zeros(n, k + 2)
-    X[:, 1] = x
-    X[:, 2] = x.^2
-    for j in 1:k
-        X[:, j+2] = max.(0, x .- knots[j]).^3
-    end
-    return X
-end
+function cubic_spline_basis(x, knots); return hcat([max(0, val - k)^3 for val in x, k in knots]); end
+function cubic_spline_penalty(knots); return [min(ki, kj) for ki in knots, kj in knots]; end
 
 
-function cubic_spline_penalty(knots)
-    k = length(knots)
-    S = zeros(k + 2, k + 2)
-    
-    # The penalty applies only to the non-linear part
-    S_k = zeros(k, k)
-    for i in 1:k
-        for j in 1:k
-             S_k[i, j] = min(knots[i], knots[j])
-        end
-    end
-    S[3:end, 3:end] = S_k
-    return S
-end
+# --- Model Constructor and Fitting ---
 
 
-function GAM(formula::FormulaTerm, data::DataFrame;
-             spline_type::Symbol=:b_spline, n_knots::Int=20, degree::Int=3)
+function GAM(formula::FormulaTerm, data::DataFrame, smooths::Vector{Smooth})
+    """
+    Writing this down because I'll inevitably forget.
 
+    # Arguments
+    FormulaTerm: Formula for the *linear* part of the model (e.g., @formula(y ~ 1 + x1)).
+    - data::DataFrame: The input data.
+    - smooths::Vector{Smooth}: A vector of Smooth objects defining the non-linear model components.
+    """
+
+    # Linear Part
     mf = ModelFrame(formula, data)
     y = response(mf)
-    X_terms = modelmatrix(mf)
+    X_linear = modelmatrix(mf)
+    
+    basis_matrices = []
+    penalty_matrices = []
+    spline_info = Dict{Symbol, Dict{Symbol, Any}}()
+    
+    # Create the Smooth Parts
+    for s in smooths
+        x_smooth = data[!, s.term]
+        knots = quantile(x_smooth, range(0, 1, length=s.n_knots))
+        
+        B, S_smooth, transform_matrix = Matrix{Float64}(undef,0,0), Matrix{Float64}(undef,0,0), nothing
 
-    smooth_term_symbol = Symbol(formula.rhs[end] |> string)
-    x_smooth = data[!, smooth_term_symbol]
-
-    knots = quantile(x_smooth, range(0, 1, length=n_knots))
-
-    B = Matrix{Float64}(undef, 0, 0)
-    S_smooth = Matrix{Float64}(undef, 0, 0)
-    pc_transform = nothing
-
-    if spline_type == :b_spline
-        B = b_spline_basis(x_smooth, knots, degree)
-        k = size(B, 2)
-
-        D = diff(diff(Diagonal(ones(k)), dims=1), dims=1)        
-        S_smooth = D' * D
-    elseif spline_type == :cubic_spline
-        if size(X_terms, 2) > 1
-            X_terms = X_terms[:, 1:1] # Keep only intercept
+        if s.spline_type == :b_spline
+            B = b_spline_basis(x_smooth, knots, s.degree)
+            p_smooth = size(B, 2)
+            D = diff(diff(Matrix{Float64}(I, p_smooth, p_smooth), dims=1), dims=1)
+            S_smooth = D' * D
+        elseif s.spline_type == :cubic_spline
+            B = cubic_spline_basis(x_smooth, knots)
+            S_smooth = cubic_spline_penalty(knots)
+        elseif s.spline_type == :pc_spline
+            X_cubic_basis = cubic_spline_basis(x_smooth, knots)
+            S_cubic_penalty = cubic_spline_penalty(knots)
+            eig = eigen(S_cubic_penalty)
+            transform_matrix = eig.vectors
+            B = X_cubic_basis * transform_matrix
+            S_smooth = Diagonal(max.(0, eig.values))
+        else
+            error("Unknown spline_type: $(s.spline_type) for term $(s.term)")
         end
-        B = cubic_spline_basis(x_smooth, knots)
-        S_smooth = cubic_spline_penalty(knots)
-    elseif spline_type == :pc_spline
-        # Start with a cubic spline basis
-        X_cubic = cubic_spline_basis(x_smooth, knots)
-        S_cubic = cubic_spline_penalty(knots)
-
-        # Eigen-decompose the penalty matrix
-        eig = eigen(S_cubic)
-        evals = eig.values
-        evecs = eig.vectors
-
-        # transformation matrix = eigenvectors
-        pc_transform = evecs
-        B = X_cubic * pc_transform
-
-        # The penalty matrix is now diagonal with the eigenvalues
-        # Use max to avoid small negative eigenvalues
-        S_smooth = Diagonal(max.(0, evals)) 
-    else
-        error("Unknown spline_type: $spline_type")
+        
+        push!(basis_matrices, B)
+        push!(penalty_matrices, S_smooth)
+        spline_info[s.term] = Dict(:knots => knots, :degree => s.degree, :transform_matrix => transform_matrix)
+    end
+    
+    # Assemble Full Model Matrix and Penalty Matrix
+    X = hcat(X_linear, basis_matrices...)
+    p_total = size(X, 2)
+    S = zeros(p_total, p_total)
+    
+    param_indices = Dict{Symbol, UnitRange{Int}}()
+    current_idx = 1
+    
+    # Indices for linear part
+    p_linear = size(X_linear, 2)
+    param_indices[:linear] = current_idx:(current_idx + p_linear - 1)
+    current_idx += p_linear
+    
+    # Indices and penalty blocks for smooth parts
+    for (i, s) in enumerate(smooths)
+        p_smooth = size(basis_matrices[i], 2)
+        idx_range = current_idx:(current_idx + p_smooth - 1)
+        param_indices[s.term] = idx_range
+        S[idx_range, idx_range] = penalty_matrices[i]
+        current_idx += p_smooth
     end
 
-    # Combine fixed and smooth effects
-    X = [X_terms B]
-
-    # Pad penalty matrix
-    n_fixed = size(X_terms, 2)
-    S = zeros(size(X, 2), size(X, 2))
-    S[n_fixed+1:end, n_fixed+1:end] = S_smooth
-
-    return GAM(formula, data, y, X, S, zeros(size(X, 2)), 1.0, 0.0,
-               spline_type, knots, degree, pc_transform)
+    # Initialize GAM Object
+    empty_vec = zeros(0); empty_mat = zeros(0,0)
+    return GAM(formula, smooths, data, y, X, S, param_indices,
+               zeros(p_total), zeros(length(smooths)),
+               empty_vec, empty_vec, empty_mat, 0.0, 0.0, 0.0, 0.0, 0.0,
+               spline_info)
 end
 
 
-function reml_score_fn(lambda_log, model::GAM)
-    lambda = exp(lambda_log[1])
-    C = model.X' * model.X + lambda * model.S
-
+function reml_score_fn(lambda_logs, model::GAM)
+    lambdas = exp.(lambda_logs)
+    
+    # Construct the full penalty matrix from lambdas and block components
+    S_pen = zeros(size(model.S))
+    for (i, s) in enumerate(model.smooths)
+        indices = model.param_indices[s.term]
+        # model.S already contains the block-diagonal structure of individual penalties
+        S_pen[indices, indices] = lambdas[i] * model.S[indices, indices]
+    end
+    
+    C = model.X' * model.X + S_pen
     try
         C_chol = cholesky(C)
         beta = C_chol \ (model.X' * model.y)
         y_hat = model.X * beta
-        residuals = model.y - y_hat
         n = length(model.y)
-        p = size(model.X, 2)
-        sigma2 = sum(abs2, residuals) / (n - p)
+        
+        # Calculate effective df for sigma2
+        edf = tr(inv(C_chol) * (model.X' * model.X)) 
+        sigma2 = sum(abs2, model.y - y_hat) / (n - edf)
+        
+        # Approximation to REML. Maybe switch that logdet to a QR Decomp
         log_det_C = logdet(C_chol)
-
-        # Probably should go from logdet(X'X) -> QR Decomposition
-        log_det_XTX = logdet(model.X' * model.X + 1e-9I)
-        reml = -((n - p) * log(2 * pi * sigma2) + sum(abs2, residuals) / sigma2 + log_det_C - log_det_XTX) / 2
+        reml = -( (n - 1) * log(sigma2) + log_det_C + sum(abs2, model.y - y_hat) / sigma2 ) / 2
         return -reml
-    catch e
-        isa(e, PosDefException) ? Inf : rethrow(e)
-    end
+    catch e; return Inf; end
 end
 
-
-function fit!(model::GAM; initial_lambda_log = 0.0)
-    objective = lambda -> reml_score_fn(lambda, model)
-    result = optimize(objective, [initial_lambda_log], LBFGS(), Optim.Options(g_tol=1e-6))
-    lambda_log_opt = Optim.minimizer(result)
-    model.lambda = exp(lambda_log_opt[1])
+function fit!(model::GAM; initial_lambda_logs = nothing)
+    num_smooths = length(model.smooths)
+    if isnothing(initial_lambda_logs)
+        initial_lambda_logs = zeros(num_smooths)
+    end
+    
+    objective = l -> reml_score_fn(l, model)
+    result = optimize(objective, initial_lambda_logs, LBFGS(), Optim.Options(g_tol=1e-6))
+    
+    # Finalize model parameters
+    model.lambdas = exp.(Optim.minimizer(result))
     model.reml_score = -Optim.minimum(result)
-    C = model.X' * model.X + model.lambda * model.S
+    
+    S_pen = zeros(size(model.S))
+    for (i, s) in enumerate(model.smooths)
+        indices = model.param_indices[s.term]
+        S_pen[indices, indices] = model.lambdas[i] * model.S[indices, indices]
+    end
+    
+    C = model.X' * model.X + S_pen
     C_chol = cholesky(C)
     model.beta = C_chol \ (model.X' * model.y)
+
+    # Compute and store summary statistics
+    n = length(model.y)
+    model.fitted_values = model.X * model.beta
+    model.residuals = model.y - model.fitted_values
+    C_inv = inv(C_chol)
+    model.edf = tr(C_inv * (model.X' * model.X))
+    model.scale = sum(model.residuals.^2) / (n - model.edf)
+    model.vcov = C_inv * model.scale
+    
+    rss = sum(model.residuals.^2)
+    tss = sum((model.y .- mean(model.y)).^2)
+    r_squared = 1 - rss / tss
+    model.deviance_explained = r_squared
+    model.adj_r_squared = 1 - ( (1 - r_squared) * (n - 1) / (n - model.edf - 1) )
+
     return model
 end
 
-
 function predict(model::GAM, newdata::DataFrame)
-    mf = ModelFrame(model.formula, newdata)
-    X_terms = modelmatrix(mf)
-
-    smooth_term_symbol = Symbol(model.formula.rhs.terms[end] |> string)
-    x_smooth = newdata[!, smooth_term_symbol]
-
-    B = Matrix{Float64}(undef, 0, 0)
-
-    if model.spline_type == :b_spline
-        B = b_spline_basis(x_smooth, model.knots, model.degree)
-    elseif model.spline_type == :cubic_spline
-        if size(X_terms, 2) > 1
-             X_terms = X_terms[:, 1:1]
+    # Reconstruct Linear Part
+    X_linear_new = modelmatrix(model.formula, newdata)
+    
+    basis_matrices = []
+    # Reconstruct Each Smooth Part
+    for s in model.smooths
+        x_smooth = newdata[!, s.term]
+        info = model.spline_info[s.term]
+        
+        B = Matrix{Float64}(undef, 0, 0)
+        if s.spline_type == :b_spline
+            B = b_spline_basis(x_smooth, info[:knots], info[:degree])
+        elseif s.spline_type == :cubic_spline
+            B = cubic_spline_basis(x_smooth, info[:knots])
+        elseif s.spline_type == :pc_spline
+            X_cubic_basis = cubic_spline_basis(x_smooth, info[:knots])
+            B = X_cubic_basis * info[:transform_matrix]
         end
-        B = cubic_spline_basis(x_smooth, model.knots)
-    elseif model.spline_type == :pc_spline
-        X_cubic = cubic_spline_basis(x_smooth, model.knots)
-        B = X_cubic * model.pc_transform
+        push!(basis_matrices, B)
     end
-
-    X_new = [X_terms B]
+    
+    X_new = hcat(X_linear_new, basis_matrices...)
     return X_new * model.beta
 end
 
