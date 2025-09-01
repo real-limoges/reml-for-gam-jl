@@ -28,7 +28,7 @@ end
 function b_spline_basis(x, knots, degree)
     n = length(x)
     k = length(knots)
-    m = k + degree + 1 # Number of basis functions
+    m = k + degree - 1
 
     # Create augmented knot vector
     aug_knots = [fill(knots[1], degree); knots; fill(knots[end], degree)]
@@ -94,7 +94,7 @@ function GAM(formula::FormulaTerm, data::DataFrame;
     y = response(mf)
     X_terms = modelmatrix(mf)
 
-    smooth_term_symbol = Symbol(formula.rhs.terms[end] |> string)
+    smooth_term_symbol = Symbol(formula.rhs[end] |> string)
     x_smooth = data[!, smooth_term_symbol]
 
     knots = quantile(x_smooth, range(0, 1, length=n_knots))
@@ -107,34 +107,31 @@ function GAM(formula::FormulaTerm, data::DataFrame;
         B = b_spline_basis(x_smooth, knots, degree)
         k = size(B, 2)
 
-        # Corrected line: apply diff twice for the second-order difference
-        D = diff(diff(Diagonal(ones(k)), dims=1), dims=1)
-        
+        D = diff(diff(Diagonal(ones(k)), dims=1), dims=1)        
         S_smooth = D' * D
     elseif spline_type == :cubic_spline
-        # Remove linear term from fixed effects if present, as it's in the basis
-        # Note: A more robust implementation would parse the formula properly.
         if size(X_terms, 2) > 1
             X_terms = X_terms[:, 1:1] # Keep only intercept
         end
         B = cubic_spline_basis(x_smooth, knots)
         S_smooth = cubic_spline_penalty(knots)
     elseif spline_type == :pc_spline
-        # 1. Start with a cubic spline basis (or another)
+        # Start with a cubic spline basis
         X_cubic = cubic_spline_basis(x_smooth, knots)
         S_cubic = cubic_spline_penalty(knots)
 
-        # 2. Eigen-decompose the penalty matrix
+        # Eigen-decompose the penalty matrix
         eig = eigen(S_cubic)
         evals = eig.values
         evecs = eig.vectors
 
-        # 3. The eigenvectors are the transformation matrix
+        # transformation matrix = eigenvectors
         pc_transform = evecs
         B = X_cubic * pc_transform
 
-        # 4. The penalty matrix is now diagonal with the eigenvalues
-        S_smooth = Diagonal(max.(0, evals)) # Use max to avoid small negative eigenvalues
+        # The penalty matrix is now diagonal with the eigenvalues
+        # Use max to avoid small negative eigenvalues
+        S_smooth = Diagonal(max.(0, evals)) 
     else
         error("Unknown spline_type: $spline_type")
     end
