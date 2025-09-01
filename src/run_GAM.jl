@@ -5,11 +5,23 @@ using .FastGAM
 Random.seed!(42)
 
 # Generate Data
-n = 200
+n = 1000
 x = collect(range(0, 1, length=n))
 true_f = sin.(3 * pi * x) .* exp.(-x)
 y = true_f + randn(n) * 0.2
-data = DataFrame(x=x, y=y)
+
+data = DataFrame(
+    x = x,
+    y = y,
+    col_3 = cos.(2 * pi * x),
+    col_4 = x.^2,
+    col_5 = log.(x .+ 1),
+    col_6 = randn(n) * 0.5,
+    col_7 = sin.(5 * pi * x),
+    col_8 = exp.(x),
+    col_9 = y * 2 + randn(n) * 0.1,
+    col_10 = x * 10
+)
 
 # Cubic has linear build into basis (so just x); 1 + x otherwise
 b_formula = @formula(y ~ 1 + x)

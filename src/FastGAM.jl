@@ -19,7 +19,9 @@ mutable struct GAM
     spline_type::Symbol
     knots::Vector{Float64}
     degree::Int
-    pc_transform::Union{Matrix{Float64}, Nothing} # Stores eigenvector matrix for PC splines
+    
+    # Stores eigenvector matrix for PC splines
+    pc_transform::Union{Matrix{Float64}, Nothing}
 end
 
 # B Splines
@@ -72,6 +74,7 @@ end
 function cubic_spline_penalty(knots)
     k = length(knots)
     S = zeros(k + 2, k + 2)
+    
     # The penalty applies only to the non-linear part
     S_k = zeros(k, k)
     for i in 1:k
@@ -103,7 +106,10 @@ function GAM(formula::FormulaTerm, data::DataFrame;
     if spline_type == :b_spline
         B = b_spline_basis(x_smooth, knots, degree)
         k = size(B, 2)
-        D = diff(Diagonal(ones(k)), dims=1, differences=2)
+
+        # Corrected line: apply diff twice for the second-order difference
+        D = diff(diff(Diagonal(ones(k)), dims=1), dims=1)
+        
         S_smooth = D' * D
     elseif spline_type == :cubic_spline
         # Remove linear term from fixed effects if present, as it's in the basis
@@ -136,7 +142,7 @@ function GAM(formula::FormulaTerm, data::DataFrame;
     # Combine fixed and smooth effects
     X = [X_terms B]
 
-    # Pad penalty matrix to match dimensions of X
+    # Pad penalty matrix
     n_fixed = size(X_terms, 2)
     S = zeros(size(X, 2), size(X, 2))
     S[n_fixed+1:end, n_fixed+1:end] = S_smooth
