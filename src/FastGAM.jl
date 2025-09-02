@@ -10,7 +10,10 @@ using Statistics
 using StatsModels: FormulaTerm, Term, TupleTerm, modelmatrix, response
 
 include("types.jl")
+include("families.jl")
 include("basis_functions.jl")
+include("solvers.jl")
+include("predict.jl")
 
 export GAM, Smooth, fit!, predict
 
@@ -99,35 +102,6 @@ function GAM(formula::FormulaTerm, data::DataFrame, smooths::Vector{Smooth})
 end
 
 
-function reml_score_fn(lambda_logs, model::GAM)
-    lambdas = exp.(lambda_logs)
-    
-    # Construct the full penalty matrix from lambdas and block components
-    S_pen = zeros(size(model.S))
-    for (i, s) in enumerate(model.smooths)
-        indices = model.param_indices[s.term]
-        # model.S already contains the block-diagonal structure of individual penalties
-        S_pen[indices, indices] = lambdas[i] * model.S[indices, indices]
-    end
-    
-    C = model.X' * model.X + S_pen
-    try
-        C_chol = cholesky(C)
-        beta = C_chol \ (model.X' * model.y)
-        y_hat = model.X * beta
-        n = length(model.y)
-        
-        # Calculate effective df for sigma2
-        edf = tr(inv(C_chol) * (model.X' * model.X)) 
-        sigma2 = sum(abs2, model.y - y_hat) / (n - edf)
-        
-        # Approximation to REML. Maybe switch that logdet to a QR Decomp
-        log_det_C = logdet(C_chol)
-        reml = -( (n - 1) * log(sigma2) + log_det_C + sum(abs2, model.y - y_hat) / sigma2 ) / 2
-        return -reml
-    catch e; return Inf; end
-end
-
 function fit!(model::GAM; initial_lambda_logs = nothing)
     num_smooths = length(model.smooths)
     if isnothing(initial_lambda_logs)
@@ -167,32 +141,4 @@ function fit!(model::GAM; initial_lambda_logs = nothing)
     model.adj_r_squared = 1 - ( (1 - r_squared) * (n - 1) / (n - model.edf - 1) )
 
     return model
-end
-
-function predict(model::GAM, newdata::DataFrame)
-    # Reconstruct Linear Part
-    X_linear_new = modelmatrix(model.formula, newdata)
-    
-    basis_matrices = []
-    # Reconstruct Each Smooth Part
-    for s in model.smooths
-        x_smooth = newdata[!, s.term]
-        info = model.spline_info[s.term]
-        
-        B = Matrix{Float64}(undef, 0, 0)
-        if s.spline_type == :b_spline
-            B = b_spline_basis(x_smooth, info[:knots], info[:degree])
-        elseif s.spline_type == :cubic_spline
-            B = cubic_spline_basis(x_smooth, info[:knots])
-        elseif s.spline_type == :pc_spline
-            X_cubic_basis = cubic_spline_basis(x_smooth, info[:knots])
-            B = X_cubic_basis * info[:transform_matrix]
-        end
-        push!(basis_matrices, B)
-    end
-    
-    X_new = hcat(X_linear_new, basis_matrices...)
-    return X_new * model.beta
-end
-
 end
