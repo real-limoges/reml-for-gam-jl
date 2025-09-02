@@ -2,90 +2,17 @@ module FastGAM
 
 using DataFrames
 using Distributions
+using FFTW
 using GLM
 using LinearAlgebra
 using Optim
+using Statistics
 using StatsModels: FormulaTerm, Term, TupleTerm, modelmatrix, response
 
+include("types.jl")
+include("basis_functions.jl")
+
 export GAM, Smooth, fit!, predict
-
-"""
-    Smooth(term::Symbol; spline_type=:b_spline, n_knots=20, degree=3)
-
-# Arguments
-- term::Symbol: The name of the variable in the data frame to apply the smoother to.
-- spline_type::Symbol: :b_spline, :cubic_spline, or :pc_spline
-- n_knots The number of knots to use for the spline basis.
-- degree::Int: The degree of the B-spline
-"""
-struct Smooth
-    term::Symbol
-    spline_type::Symbol
-    n_knots::Int
-    degree::Int
-end
-# Provide a convenient keyword-based constructor
-Smooth(term::Symbol; spline_type::Symbol=:b_spline, n_knots::Int=20, degree::Int=3) = Smooth(term, spline_type, n_knots, degree)
-
-
-# --- Core GAM Structure ---
-
-mutable struct GAM
-    # Inputs
-    formula::FormulaTerm
-    smooths::Vector{Smooth}
-    data::DataFrame
-    y::Vector{Float64}
-    X::Matrix{Float64} # Full model matrix (linear part + all smooth bases)
-    S::Matrix{Float64} # Block-diagonal penalty matrix (unscaled)
-    
-    # Information about model structure
-    param_indices::Dict{Symbol, UnitRange{Int}} # Stores indices for each model component
-    
-    # Fitted parameters
-    beta::Vector{Float64}
-    lambdas::Vector{Float64}
-
-    # Model summary statistics
-    fitted_values::Vector{Float64}
-    residuals::Vector{Float64}
-    vcov::Matrix{Float64}
-    edf::Float64
-    scale::Float64
-    adj_r_squared::Float64
-    deviance_explained::Float64
-    reml_score::Float64
-    
-    # Information for prediction
-    spline_info::Dict{Symbol, Dict{Symbol, Any}} # Stores knots, degree, etc. for each smooth
-end
-
-
-function b_spline_basis(x, knots, degree)
-    n = length(x)
-    aug_knots = [fill(knots[1], degree); knots; fill(knots[end], degree)]
-    
-    # The number of basis functions is determined by the number of knots and the degree.
-    # m = N - p - 1, where N is the number of knots in the augmented vector.
-    m = length(aug_knots) - degree - 1
-    
-    B = zeros(n, m)
-    for i in 1:n, j in 1:m
-        B[i, j] = b_spline_basis_element(x[i], j, degree, aug_knots)
-    end
-    return B
-end
-
-function b_spline_basis_element(x, j, p, t)
-    if p == 0; return t[j] <= x < t[j+1] || (x == t[end] && j == length(t) - p - 1) ? 1.0 : 0.0; end
-    w1 = 0.0; w2 = 0.0
-    if t[j+p] - t[j] > 1e-9; w1 = (x - t[j]) / (t[j+p] - t[j]) * b_spline_basis_element(x, j, p - 1, t); end
-    if t[j+p+1] - t[j+1] > 1e-9; w2 = (t[j+p+1] - x) / (t[j+p+1] - t[j+1]) * b_spline_basis_element(x, j + 1, p - 1, t); end
-    return w1 + w2
-end
-
-function cubic_spline_basis(x, knots); return hcat([max(0, val - k)^3 for val in x, k in knots]); end
-function cubic_spline_penalty(knots); return [min(ki, kj) for ki in knots, kj in knots]; end
 
 
 # --- Model Constructor and Fitting ---
