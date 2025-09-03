@@ -43,34 +43,34 @@ for (i, s) in enumerate(gam_model.smooths)
 end
 
 # Partial Effects Plots
-function plot_partial_effects(model::GAM, true_funcs::Dict)
-    smooth_vars = [s.term for s in model.smooths]
-    p = plot(layout=(length(smooth_vars), 1), size=(800, 400 * length(smooth_vars)))
-    link_name = string(canonicallink(model.family))
+# function plot_partial_effects(model::GAM, true_funcs::Dict)
+#     smooth_vars = [s.term for s in model.smooths]
+#     p = plot(layout=(length(smooth_vars), 1), size=(800, 400 * length(smooth_vars)))
+#     link_name = string(canonicallink(model.family))
     
-    for (i, var) in enumerate(smooth_vars)
-        smooth_indices = model.param_indices[var]
-        eta_partial = model.X[:, smooth_indices] * model.beta[smooth_indices]
-        eta_partial .-= mean(eta_partial)
+#     for (i, var) in enumerate(smooth_vars)
+#         smooth_indices = model.param_indices[var]
+#         eta_partial = model.X[:, smooth_indices] * model.beta[smooth_indices]
+#         eta_partial .-= mean(eta_partial)
         
-        x_data = model.data[!, var]
-        sort_order = sortperm(x_data)
+#         x_data = model.data[!, var]
+#         sort_order = sortperm(x_data)
         
-        plot!(p[i], x_data[sort_order], eta_partial[sort_order], label="Fitted s($(var))", lw=2)
+#         plot!(p[i], x_data[sort_order], eta_partial[sort_order], label="Fitted s($(var))", lw=2)
         
-        if haskey(true_funcs, var)
-            true_y = true_funcs[var]
-            true_y .-= mean(true_y)
-            plot!(p[i], x_data[sort_order], true_y[sort_order], label="True f($(var))", ls=:dash, color=:black)
-        end
+#         if haskey(true_funcs, var)
+#             true_y = true_funcs[var]
+#             true_y .-= mean(true_y)
+#             plot!(p[i], x_data[sort_order], true_y[sort_order], label="True f($(var))", ls=:dash, color=:black)
+#         end
         
-        scatter!(p[i], x_data, fill(minimum(eta_partial), length(x_data)), marker=:vline, markersize=5, markeralpha=0.2, label="", color=:gray)
-        title!(p[i], "Partial Effect for s($(var))")
-        xlabel!(p[i], string(var))
-        ylabel!(p[i], "f($(var)) on $(link_name) scale")
-    end
-    return p
-end
+#         scatter!(p[i], x_data, fill(minimum(eta_partial), length(x_data)), marker=:vline, markersize=5, markeralpha=0.2, label="", color=:gray)
+#         title!(p[i], "Partial Effect for s($(var))")
+#         xlabel!(p[i], string(var))
+#         ylabel!(p[i], "f($(var)) on $(link_name) scale")
+#     end
+#     return p
+# end
 
 true_functions = Dict(:x0 => true_f0, :x1 => true_f1)
 plots = plot_partial_effects(gam_model, true_functions)

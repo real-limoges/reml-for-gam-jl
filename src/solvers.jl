@@ -1,48 +1,92 @@
-# src/solvers.jl
+# Solve the penalized weighted least squares system using Cholesky factorization.
+# (X'WX + S_pen)beta = X'Wz
 
-# PIRLS / GCV Solver
-function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace, max_pirls_iter; pirls_tol=1e-8)
-    lambdas = exp.(lambda_logs)
-    max_iter, tol = 25, 1e-8
-    
-    model.mu .= (model.y .+ 0.5) ./ 2
-    model.eta .= linkfun.(link, model.mu)
-    
-    local beta
-    for _ in 1:max_iter
-        beta_old = copy(model.beta)
-        
-        mu_eta_val = mueta.(link, model.eta)
-        var_val = mu_variance.(model.family, model.mu)
-        model.w .= mu_eta_val.^2 ./ var_val
-        model.z .= model.eta .+ (model.y .- model.mu) ./ mu_eta_val
-        
-        ws.S_pen .= 0.0
-        for (i, s) in enumerate(model.smooths)
-            indices = model.param_indices[s.term]
-            view(ws.S_pen, indices, indices) .= lambdas[i] .* view(model.S, indices, indices)
-        end
-        
+function update_coefficients!(beta::AbstractVector, ws::Workspace, model::GAM, ::Val{:gcv})
+    try
+        # Assemble matrices
         ws.W.diag .= model.w
         mul!(ws.X_W_X, model.X', ws.W * model.X)
         ws.C .= ws.X_W_X .+ ws.S_pen
         mul!(ws.X_W_z, model.X', ws.W * model.z)
 
-        try
-            beta = cholesky!(ws.C) \ ws.X_W_z
-        catch e; return Inf; end
+        # Solve using Cholesky factorization
+        # Symmetric() used so the 15th decimal place doesn't mess things up
+        F = cholesky!(Symmetric(ws.C))
+        beta .= F \ ws.X_W_z
+        return true
+    catch e
+        # If factorization fails (e.g., not positive definite), return failure
+        if isa(e, PosDefException); return false; end
+        rethrow(e)
+    end
+end
 
-        model.eta .= model.X * beta
-        model.mu .= linkinv.(link, model.eta)
-        
-        if norm(beta - beta_old) < tol * (norm(beta) + tol)
-            model.beta .= beta
-            break
-        end
-        model.beta .= beta
+
+# Solve the penalized weighted least squares system using FFT
+function update_coefficients!(beta::AbstractVector, ws::Workspace, model::GAM, ::Val{:fft})
+    # If we're able to run the fft solver, then X'WX becomes a banded toeplitz-like matrix
+
+    # To do:
+    # Constructing the required vectors for convolution based on model.w, model.z, and model.S
+    # Performing FFTs, element-wise products/divisions, and an inverse FFT.
+    # Then update beta and return bool
+    throw(ErrorException("FFT solver is not yet implemented."))
+end
+
+
+# Performs one update step of the PIRLS algorithm.
+# It updates weights w, pseudo-data z, solves for beta, and updates eta and mu.
+function update_pirls!(model::GAM, link, lambdas, ws::Workspace, solver_val::Val)
+    # Update weights and pseudo-data based on current mu and eta
+    mu_eta_val = mueta.(link, model.eta)
+    var_val = mu_variance.(model.family, model.mu)
+    model.w .= mu_eta_val.^2 ./ var_val
+    model.z .= model.eta .+ (model.y .- model.mu) ./ mu_eta_val
+    
+    # Assemble the combined penalty matrix S_pen
+    ws.S_pen .= 0.0
+    for (i, s) in enumerate(model.smooths)
+        indices = model.param_indices[s.term]
+        view(ws.S_pen, indices, indices) .+= lambdas[i] .* view(model.S, indices, indices)
     end
     
-    F = cholesky(ws.C)
+    successful_solve = update_coefficients!(model.beta, ws, model, solver_val)
+    if !successful_solve
+        return false
+    end
+
+    model.eta .= model.X * model.beta
+    model.mu .= linkinv.(link, model.eta)
+    
+    return true
+end
+
+
+# The objective function for Optim.jl: calculates the GCV score for a given set of lambdas.
+function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace, solver_val::Val)
+    lambdas = exp.(lambda_logs)
+    max_iter, tol = 25, 1e-8
+    
+    # Initialize mu and eta for the first iteration
+    model.mu .= (model.y .+ 0.5) ./ 2
+    model.eta .= linkfun.(link, model.mu)
+    
+    local beta_old
+    for _ in 1:max_iter
+        beta_old = copy(model.beta)
+        
+        successful_update = update_pirls!(model, link, lambdas, ws, solver_val)
+        if !successful_update
+            return Inf # Return a high GCV score if the solver fails
+        end
+        
+        if norm(model.beta - beta_old) < tol * (norm(model.beta) + tol)
+            break
+        end
+    end
+    
+    # Calculate GCV score
+    F = cholesky(Symmetric(ws.C)) # ws.C was updated inside update_coefficients! for the :gcv solver
     edf = tr(F \ ws.X_W_X)
     n = length(model.y)
     rss = sum(model.w .* (model.z .- model.eta).^2)
@@ -51,77 +95,62 @@ function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace, max_pirls_it
     return gcv
 end
 
-function solve_fft(model)
-    x = 'f'
-    return model
-end
 
-function fit!(model::GAM, solver=:pirls; initial_lambda_logs = nothing, max_pirls_iter=25)
+
+# Main Fit Function
+function fit!(model::GAM; 
+              solver::Symbol = :gcv,
+              initial_lambda_logs = nothing, 
+              pirls_tol=1e-8, 
+              max_pirls_iter=25)
+              
+    # If compatible then call it. B-splines equally spaced
+    if solver === :fft
+        # Check to make sure that it can support FFT (b splines + equally spaced grid) 
+        # difference penalty S
+    end
+    
     num_smooths = length(model.smooths)
+    if isnothing(initial_lambda_logs); initial_lambda_logs = zeros(num_smooths); end
+    
     link = canonicallink(model.family)
-    
-    if isnothing(initial_lambda_logs)
-        initial_lambda_logs = zeros(num_smooths)
-    end
-    
-    if solver == :fft
-        objective = l -> solve_fft(model)
-    else
-        objective = l -> gcv_score_fn(l, model, link, model.workspace, max_pirls_iter)
-        result = optimize(objective, initial_lambda_logs, LBFGS(), Optim.Options(g_tol = 1e-6))
-        model.gcv_score = Optim.minimum(result)
-        model.lambdas = exp.(Optim.minimizer(result))
-    end
-    
+    ws = model.workspace
+    solver_val = Val(solver)
 
-    # Final PIRLS run
-    model.mu .= (model.y .+ 0.5) ./ 2
+    # Optimize Smoothing Params using GCV
+    objective = l -> gcv_score_fn(l, model, link, ws, solver_val)
+    result = optimize(objective, initial_lambda_logs, LBFGS(), Optim.Options(g_tol = 1e-6))
+    
+    model.lambdas = exp.(Optim.minimizer(result))
+    model.gcv_score = Optim.minimum(result)
+
+    # Final PIRLS run with optimal lambdas
+    
+    # Re-initialize mu and eta
+    model.mu .= (model.y .+ 0.5) ./ 2 
     model.eta .= linkfun.(link, model.mu)
-    for i in 1:max_pirls_iter
-        println(i)
+    for _ in 1:max_pirls_iter
         beta_old = copy(model.beta)
-        mu_eta_val = mueta.(link, model.eta)
-        var_val = mu_variance.(model.family, model.mu)
-        model.w .= mu_eta_val.^2 ./ var_val
-        model.z .= model.eta .+ (model.y .- model.mu) ./ mu_eta_val
-        
-        S_pen = zeros(size(model.S))
-        for (i, s) in enumerate(model.smooths)
-            indices = model.param_indices[s.term]
-            S_pen[indices, indices] = model.lambdas[i] * model.S[indices, indices]
+        update_pirls!(model, link, model.lambdas, ws, solver_val)
+        if norm(model.beta - beta_old) < pirls_tol * (norm(model.beta) + pirls_tol)
+            break
         end
-        
-        W = Diagonal(model.w)
-        C = model.X' * W * model.X + S_pen
-        F = cholesky(C)
-        model.beta = F \ (model.X' * W * model.z)
-        model.eta = model.X * model.beta
-        model.mu = linkinv.(link, model.eta)
-        
-        if norm(model.beta - beta_old) < pirls_tol * (norm(model.beta) + pirls_tol); break; end
     end
-    
-    model = summary_statistics(model)
 
-    return model
-end
-
-function summary_statistics(model::GAM)
-
+    # Final summary statistics
     model.fitted_values .= model.mu
     model.residuals .= model.y .- model.mu
     
-    S_pen = zeros(size(model.S))
-    for (i,s) in enumerate(model.smooths)
-        indices = model.param_indices[s.term]
-        S_pen[indices, indices] = model.lambdas[i] * model.S[indices, indices]
-    end
-    
+    # Re-compute C and C_unpen for edf and vcov
+    # This part is specific to the matrix-based approach
+    S_pen = ws.S_pen # S_pen was calculated in the last update_pirls! call
     W = Diagonal(model.w)
     C_unpen = model.X' * W * model.X
-    F_pen = cholesky(C_unpen + S_pen)
+    C_pen = C_unpen + S_pen
+    F_pen = cholesky(Symmetric(C_pen))
+
     model.edf = tr(F_pen \ C_unpen)
     model.vcov = inv(F_pen)
-
+    
     return model
 end
