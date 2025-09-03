@@ -14,7 +14,7 @@ Random.seed!(42)
 println("--- Generating Synthetic Binary Data ---")
 n = 1000
 x0 = collect(range(-3, 3, length=n))
-x1 = rand(n) * 4 - 2
+x1 = randn(n) * 4 .- 2
 x2 = randn(n)
 
 true_f0 = -sin.(x0)
