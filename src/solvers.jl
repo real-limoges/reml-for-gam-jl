@@ -1,7 +1,7 @@
 # src/solvers.jl
 
 # PIRLS / GCV Solver
-function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace)
+function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace, max_pirls_iter; pirls_tol=1e-8)
     lambdas = exp.(lambda_logs)
     max_iter, tol = 25, 1e-8
     
@@ -51,21 +51,34 @@ function gcv_score_fn(lambda_logs, model::GAM, link, ws::Workspace)
     return gcv
 end
 
-function fit!(model::GAM; initial_lambda_logs = nothing, pirls_tol=1e-8, max_pirls_iter=25)
+function solve_fft(model)
+    x = 'f'
+    return model
+end
+
+function fit!(model::GAM, solver=:pirls; initial_lambda_logs = nothing, max_pirls_iter=25)
     num_smooths = length(model.smooths)
-    if isnothing(initial_lambda_logs); initial_lambda_logs = zeros(num_smooths); end
-    
     link = canonicallink(model.family)
-    objective = l -> gcv_score_fn(l, model, link, model.workspace)
-    result = optimize(objective, initial_lambda_logs, LBFGS(), Optim.Options(g_tol = 1e-6))
     
-    model.lambdas = exp.(Optim.minimizer(result))
-    model.gcv_score = Optim.minimum(result)
+    if isnothing(initial_lambda_logs)
+        initial_lambda_logs = zeros(num_smooths)
+    end
+    
+    if solver == :fft
+        objective = l -> solve_fft(model)
+    else
+        objective = l -> gcv_score_fn(l, model, link, model.workspace, max_pirls_iter)
+        result = optimize(objective, initial_lambda_logs, LBFGS(), Optim.Options(g_tol = 1e-6))
+        model.gcv_score = Optim.minimum(result)
+        model.lambdas = exp.(Optim.minimizer(result))
+    end
+    
 
     # Final PIRLS run
     model.mu .= (model.y .+ 0.5) ./ 2
     model.eta .= linkfun.(link, model.mu)
-    for _ in 1:max_pirls_iter
+    for i in 1:max_pirls_iter
+        println(i)
         beta_old = copy(model.beta)
         mu_eta_val = mueta.(link, model.eta)
         var_val = mu_variance.(model.family, model.mu)
@@ -87,8 +100,14 @@ function fit!(model::GAM; initial_lambda_logs = nothing, pirls_tol=1e-8, max_pir
         
         if norm(model.beta - beta_old) < pirls_tol * (norm(model.beta) + pirls_tol); break; end
     end
+    
+    model = summary_statistics(model)
 
-    # Final summary statistics
+    return model
+end
+
+function summary_statistics(model::GAM)
+
     model.fitted_values .= model.mu
     model.residuals .= model.y .- model.mu
     
@@ -103,6 +122,6 @@ function fit!(model::GAM; initial_lambda_logs = nothing, pirls_tol=1e-8, max_pir
     F_pen = cholesky(C_unpen + S_pen)
     model.edf = tr(F_pen \ C_unpen)
     model.vcov = inv(F_pen)
-    
+
     return model
 end
